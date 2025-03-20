@@ -1,4 +1,13 @@
-import { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, TeamMemberMembershipState } from 'discord.js';
+import { 
+    Client, 
+    GatewayIntentBits, 
+    Events, 
+    ActionRowBuilder, 
+    ButtonBuilder, 
+    ButtonStyle, 
+    GuildScheduledEventPrivacyLevel,
+    GuildScheduledEventEntityType,
+} from 'discord.js';
 import { config } from 'dotenv';
 
 config(); // Load environment variables from .env
@@ -8,6 +17,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildScheduledEvents
   ],
 });
 
@@ -176,5 +186,127 @@ client.on('messageCreate', async (message) => {
     await message.reply(schedule);
   }
 });
+
+// Command to create event
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+
+    if (message.content.startsWith('!e')) {
+        // Ask the user for the event duration
+        const reply = await message.reply('How many hours will the event last? Please enter an integer.');
+
+        // Create a message collector to wait for the user's response
+        const filter = (response) => response.author.id === message.author.id && !isNaN(response.content);
+        const collector = message.channel.createMessageCollector({ filter, time: 30000, max: 1 });
+
+        collector.on('collect', async (collectedMessage) => {
+            const duration = parseInt(collectedMessage.content);
+
+            if (duration <= 0) {
+                return message.channel.send('Invalid duration. Please enter a positive integer.');
+            }
+
+            const bestTimes = findBestAvailability(duration); // Replace with your function to find best time slots
+
+            // Create buttons for the top 3 available times
+            const buttons = bestTimes.map((time, index) => 
+                new ButtonBuilder()
+                    .setCustomId(`event_time_${index}`)
+                    .setLabel(time)
+                    .setStyle(ButtonStyle.Primary)
+            );
+
+            const row = new ActionRowBuilder().addComponents(buttons);
+
+            const selectionMessage = await message.channel.send({
+                content: `Top 3 best time slots for a ${duration}-hour event. Choose one:`,
+                components: [row]
+            });
+
+            // Create an interaction collector to listen for button clicks
+            const interactionFilter = (interaction) => interaction.user.id === message.author.id;
+            const interactionCollector = selectionMessage.createMessageComponentCollector({ filter: interactionFilter, time: 30000 });
+
+            interactionCollector.on('collect', async (interaction) => {
+                const selectedIndex = parseInt(interaction.customId.split('_')[2]); // Extract index from button ID
+                const selectedTime = bestTimes[selectedIndex];
+
+                await interaction.update({ content: `✅ You selected: **${selectedTime}**. Creating event...`, components: [] });
+
+                createDiscordEvent(message.guild, selectedTime);
+            });
+
+            interactionCollector.on('end', (collected, reason) => {
+                if (reason === 'time') {
+                    selectionMessage.edit({ content: '⏳ You took too long to respond. Please try again.', components: [] });
+                }
+            });
+        });
+
+        collector.on('end', (collected, reason) => {
+            if (reason === 'time') {
+                message.channel.send('You took too long to respond. Please try again.');
+            }
+        });
+    }
+});
+
+const findBestAvailability = (duration) => {
+    let scores = {}; // Store how many users are available for each start time
+    
+    // Iterate over time slots and calculate available users for each duration window
+    for (let i = 0; i < timeSlots.length - (duration - 1); i++) {
+        let startSlot = timeSlots[i];
+        let count = 0;
+        
+        for (let user in availability) {
+        let userAvailable = true;
+        
+        // Check if user is available for the entire duration
+        for (let j = 0; j < duration; j++) {
+            if (!availability[user].includes(timeSlots[i + j])) {
+            userAvailable = false;
+            break;
+            }
+        }
+        
+        if (userAvailable) count++;
+        }
+        
+        scores[startSlot] = count;
+    }
+
+    // Sort time slots by the number of available users (descending)
+    let sortedTimes = Object.entries(scores)
+        .sort((a, b) => b[1] - a[1]) // Sort by user count
+        .slice(0, 3) // Take the top 3
+        .map(entry => `${entry[0]} - ${entry[1]} users available`);
+
+    return sortedTimes;
+}
+
+const createDiscordEvent = async (guild, eventTime) => {
+    const startTime = new Date(); // Replace this with actual parsed time from eventTime
+    startTime.setMinutes(0, 0, 0); // Example: Round to the nearest hour
+
+    const endTime = new Date(startTime);
+    endTime.setHours(startTime.getHours() + 1); // 1-hour event duration (adjust as needed)
+
+    try {
+        const event = await guild.scheduledEvents.create({
+            name: `📅 Community Event - ${eventTime}`,
+            scheduledStartTime: startTime.toISOString(),
+            scheduledEndTime: endTime.toISOString(),
+            privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+            entityType: GuildScheduledEventEntityType.Voice,
+            description: `An event scheduled at ${eventTime}. Be sure to join!`,
+            channel: guild.channels.cache.find(c => c.type === 2), // Select a voice channel
+        });
+
+        guild.systemChannel.send(`📢 **New Event Created!**\n📅 **${event.name}**\n🕒 **Time:** ${eventTime}\n🔗 [Join Event](${event.url})`);
+    } catch (error) {
+        console.error('Error creating event:', error);
+    }
+};
 
 client.login(process.env.TOKEN);
