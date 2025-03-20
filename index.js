@@ -17,13 +17,15 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildScheduledEvents
+    GatewayIntentBits.GuildScheduledEvents,
+    GatewayIntentBits.GuildMembers
   ],
 });
 
-client.once(Events.ClientReady, () => {
-  console.log(`Logged in as ${client.user.tag}`);
-});
+// Store user availability for each time slot
+let availability = {};
+let usersSubmitted = new Set(); // Track users who have clicked submit
+let rows = [];
 
 const timeSlots = [
   "𝟶𝟿꞉𝟶𝟶᲼𝙰𝙼᲼᲼",
@@ -38,11 +40,6 @@ const daysOfWeek = [
   "𝚃𝚑𝚞𝚛𝚜𝚍𝚊𝚢᲼",
   "𝙵𝚛𝚒𝚍𝚊𝚢᲼᲼᲼"
 ];
-
-// Store user availability for each time slot
-let availability = {};
-let usersSubmitted = new Set(); // Track users who have clicked submit
-let rows = [];
     
 // Add buttons for days of the week
 let currentRow = new ActionRowBuilder();
@@ -83,6 +80,35 @@ submitRow.addComponents(
 );
 rows.push(submitRow)
 
+client.once(Events.ClientReady, async () => {
+  console.log(`Logged in as ${client.user.tag}`);
+
+  try {
+    // Get the first guild the bot is a part of
+    const guild = client.guilds.cache.first();
+    
+    if (!guild) {
+      console.log('Bot is not part of any guild.');
+      return;
+    }
+
+    console.log(`Bot is in the guild: ${guild.name} (ID: ${guild.id})`);
+
+    const allUsers = await guild.members.fetch(); // Fetch all members in the guild
+    
+    // Initialize availability for non-bot users
+    allUsers.forEach((member) => {
+      if (!member.user.bot) { // Ensure we're only adding non-bot users
+        availability[member.user.username] = [new Set(), new Set(), new Set(), new Set(), new Set()];
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching members:', error);
+  }
+})
+
+
+
 client.on('messageCreate', async (message) => {
   if (message.content === '!s') {
     // Send the message with the grid of buttons
@@ -96,38 +122,30 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
   const user = interaction.user;
-  
-  // // Mark the time slot for the user
-  // if (!availability[user.username]) {
-  //   availability[user.username] = [];
-  // }
-
-  // // Add the user to the time slot
-  // if (!availability[user.username].includes(timeSlot)) {
-  //   availability[user.username].push(timeSlot);
-  // }
 
   // Modify the button color for the user who clicked it
   if (interaction.customId.includes('available_')) {
     const chosenTimeIndex = parseInt(interaction.customId.split('_')[1])
     const chosenDayIndex = parseInt(interaction.customId.split('_')[2])
-    let chosenTime = timeSlots[chosenTimeIndex];
-    const chosenDay = daysOfWeek[chosenDayIndex];
-    if (chosenDayIndex == 1) {
-      chosenTime += "᲼"
-    }
-
-    rows[chosenTimeIndex+1].components[chosenDayIndex] = new ButtonBuilder()
-      .setCustomId(interaction.customId)  // Retain the same customId
-      .setLabel(chosenTime)  // Optional: change the label
-      .setStyle(ButtonStyle.Success);
+    availability[user.username][chosenDayIndex].add(chosenTimeIndex);
     
-    // TODO: Might need to make a copy of rows instead of doing this since it might also updated for other users
-
+    const rowsCopy = JSON.parse(JSON.stringify(rows));
+    for (let x = 0; x < daysOfWeek.length; x++) { 
+      availability[user.username][x].forEach((_, y) => {
+        let chosenTime = timeSlots[y];
+        if (x == 1) {
+          chosenTime += "᲼"
+        }
+        rowsCopy[y + 1].components[x] = new ButtonBuilder()
+            .setCustomId(`available_${x}_${y}`)
+            .setLabel(chosenTime)
+            .setStyle(ButtonStyle.Success);
+      })
+    }
+    
     // Edit the message with the updated button rows
     await interaction.update({
-      content: `You selected: ${chosenTime} on ${chosenDay}`,
-      components: rows,
+      components: rowsCopy,
       ephemeral: true, //TODO: Not sure if need this
     });
   }
@@ -136,22 +154,24 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.customId === 'submit') {
     usersSubmitted.add(user.username); // Track user submission
 
-    // Check if all users have submitted
-    const allUsers = await interaction.guild.members.fetch(); // Fetch all members in the guild
-    const totalUsers = allUsers.filter(member => !member.user.bot).size; // Count non-bot users
+    // Fetch all members of the guild (excluding bots)
+    const allUsers = await interaction.guild.members.fetch();
+    const totalUsers = allUsers.filter(member => !member.user.bot).size;
 
+    // Check if all non-bot users have submitted their availability
     if (usersSubmitted.size === totalUsers) {
       // All users have submitted, now calculate the best time slots
       let availableTimes = [];
 
       // Iterate over all time slots and find common availability
-      timeSlots.forEach((timeSlot) => {
+      timeSlots.forEach((timeSlot, timeIndex) => {
         let availableCount = 0;
         for (let user in availability) {
-          if (availability[user].includes(timeSlot)) {
+          if (availability[user].some(day => day.has(timeIndex))) {
             availableCount++;
           }
         }
+        // If every user has selected this time slot, add it to the availableTimes
         if (availableCount === totalUsers) {
           availableTimes.push(timeSlot); // Add to the list if all users are available at this time
         }
@@ -172,7 +192,6 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 });
-
 
 // Command to display the availability grid
 client.on('messageCreate', async (message) => {
